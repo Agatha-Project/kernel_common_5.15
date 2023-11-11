@@ -74,6 +74,8 @@
 #include <linux/khugepaged.h>
 #include <linux/buffer_head.h>
 #include <trace/hooks/mm.h>
+#include <trace/hooks/vmscan.h>
+
 #include <asm/sections.h>
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
@@ -1410,6 +1412,7 @@ static __always_inline bool free_pages_prepare(struct page *page,
 			unsigned int order, bool check_free, fpi_t fpi_flags)
 {
 	int bad = 0;
+	bool skip_kasan_poison = should_skip_kasan_poison(page, fpi_flags);
 	bool init = want_init_on_free();
 
 	VM_BUG_ON_PAGE(PageTail(page), page);
@@ -1483,7 +1486,7 @@ static __always_inline bool free_pages_prepare(struct page *page,
 	 * With hardware tag-based KASAN, memory tags must be set before the
 	 * page becomes unavailable via debug_pagealloc or arch_free_page.
 	 */
-	if (!should_skip_kasan_poison(page, fpi_flags)) {
+	if (!skip_kasan_poison) {
 		kasan_poison_pages(page, order, init);
 
 		/* Memory is already initialized if KASAN did it internally. */
@@ -2617,6 +2620,7 @@ static void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags
 		set_page_pfmemalloc(page);
 	else
 		clear_page_pfmemalloc(page);
+	trace_android_vh_test_clear_look_around_ref(page);
 }
 
 /*
@@ -3168,6 +3172,17 @@ __rmqueue(struct zone *zone, unsigned int order, int migratetype,
 
 retry:
 	page = __rmqueue_smallest(zone, order, migratetype);
+
+	/*
+	 * let normal GFP_MOVABLE has chance to try MIGRATE_CMA
+	 */
+	if (unlikely(!page) && (migratetype == MIGRATE_MOVABLE)) {
+		bool try_cma = false;
+		trace_android_vh_rmqueue_cma_fallback(zone, order, &page);
+		trace_android_vh_try_cma_fallback(zone, order, &try_cma);
+		if (try_cma)
+			page = __rmqueue_cma_fallback(zone, order);
+	}
 
 	if (unlikely(!page) && __rmqueue_fallback(zone, order, migratetype,
 						  alloc_flags))
@@ -4338,6 +4353,7 @@ static inline unsigned int gfp_to_alloc_flags_cma(gfp_t gfp_mask,
 #ifdef CONFIG_CMA
 	if (gfp_migratetype(gfp_mask) == MIGRATE_MOVABLE && gfp_mask & __GFP_CMA)
 		alloc_flags |= ALLOC_CMA;
+	trace_android_vh_alloc_flags_cma_adjust(gfp_mask, &alloc_flags);
 #endif
 	return alloc_flags;
 }
